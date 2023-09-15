@@ -238,9 +238,9 @@ data:
   config: |
     DB_USER=
     DB_PASSWORD=
-    DB_HOST=
+    DB_HOST=tekton-results-postgres-service.openshift-pipelines.svc.cluster.local
     DB_PORT=5432
-    DB_NAME=
+    DB_NAME=tekton-results
     DB_SSLMODE=disable
     DB_ENABLE_AUTO_MIGRATION=true
     SERVER_PORT=8080
@@ -501,8 +501,6 @@ spec:
     spec:
       containers:
         - env:
-            - name: DB_HOST
-              value: tekton-results-postgres-service.tekton-pipelines.svc.cluster.local
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
@@ -513,8 +511,6 @@ spec:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
                   name: tekton-results-postgres
-            - name: DB_NAME
-              value: tekton-results
           image: gcr.io/tekton-releases/github.com/tektoncd/results/cmd/api:v0.8.0@sha256:32b4d598a6be6f201c413da5cd9c1dd714393c0ad7da35cd12b6b648b38db81c
           livenessProbe:
             httpGet:
@@ -657,11 +653,24 @@ spec:
         app.kubernetes.io/version: v0.8.0
     spec:
       containers:
-        - envFrom:
-            - configMapRef:
-                name: tekton-results-postgres
-            - secretRef:
-                name: tekton-results-postgres
+        - env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  key: POSTGRES_DB
+                  name: tekton-results-postgres
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: tekton-results-postgres
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_USER
+                  name: tekton-results-postgres
           image: bitnami/postgresql@sha256:23b9a21460fefdd83accd0f864e734c88bebc67c86ee752a97b77dd4843907f0
           name: postgres
           ports:
@@ -678,7 +687,7 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           volumeMounts:
-            - mountPath: /bitnami/postgresql
+            - mountPath: /var/lib/postgresql
               name: postgredb
   volumeClaimTemplates:
     - metadata:
