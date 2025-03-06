@@ -88,6 +88,7 @@ func (r *Reconciler) transform(ctx context.Context, manifest *mf.Manifest, comp 
 		common.ReplaceNamespaceInDeploymentArgs([]string{resultWatcherDeployment}, targetNs),
 		common.ReplaceNamespaceInDeploymentEnv(resultDeployementNames, targetNs),
 		updateApiConfig(instance.Spec),
+		updateApiEnv(instance.Spec),
 		enablePVCLogging(instance.Spec.ResultsAPIProperties),
 		updateEnvWithSecretName(instance.Spec.ResultsAPIProperties),
 		populateGoogleCreds(instance.Spec.ResultsAPIProperties),
@@ -165,6 +166,119 @@ func enablePVCLogging(p v1alpha1.ResultsAPIProperties) mf.Transformer {
 		}
 		u.SetUnstructuredContent(unstrObj)
 
+		return nil
+	}
+}
+
+func updateApiEnv(s v1alpha1.TektonResultSpec) mf.Transformer {
+	p := s.ResultsAPIProperties
+	return func(u *unstructured.Unstructured) error {
+
+		if u.GetKind() != "Deployment" || u.GetName() != deploymentAPI {
+			return nil
+		}
+
+		values := reflect.ValueOf(p)
+		types := values.Type()
+		prop := make(map[string]string)
+
+		applyLokiStackConfig(prop, s.LokiStackProperties)
+
+		if !s.IsExternalDB {
+			prop["DB_HOST"] = "tekton-results-postgres-service." + s.TargetNamespace + ".svc.cluster.local"
+		}
+
+		for i := 0; i < values.NumField(); i++ {
+			key := strings.Split(types.Field(i).Tag.Get("json"), ",")[0]
+			if key == "" {
+				continue
+			}
+			ukey := strings.ToUpper(key)
+
+			if values.Field(i).Kind() == reflect.Bool {
+				prop[ukey] = strconv.FormatBool(values.Field(i).Bool())
+				continue
+			}
+
+			if values.Field(i).Kind() == reflect.Int64 {
+				prop[ukey] = strconv.FormatInt(values.Field(i).Int(), 10)
+				continue
+			}
+
+			if values.Field(i).Kind() == reflect.Uint64 {
+				prop[ukey] = strconv.FormatUint(values.Field(i).Uint(), 10)
+				continue
+			}
+
+			if values.Field(i).Kind() == reflect.Ptr {
+				innerElem := values.Field(i).Elem()
+
+				if !innerElem.IsValid() {
+					continue
+				}
+				switch innerElem.Kind() {
+				case reflect.Bool:
+					prop[ukey] = strconv.FormatBool(innerElem.Bool())
+					continue
+
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					prop[ukey] = strconv.FormatInt(innerElem.Int(), 10)
+					continue
+
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					prop[ukey] = strconv.FormatUint(innerElem.Uint(), 10)
+					continue
+				}
+			}
+
+			if value := values.Field(i).String(); value != "" {
+				prop[ukey] = value
+			}
+		}
+
+
+		dep := &appsv1.Deployment{}
+		err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(u.Object, dep)
+		if err != nil {
+			return err
+		}
+
+		// find the matching container and add env and secret name object
+		for containerIndex, container := range dep.Spec.Template.Spec.Containers {
+			if container.Name != apiContainerName {
+				continue
+			}
+
+			// get existing env from the container
+			existingEnv := container.Env
+			if existingEnv == nil {
+				existingEnv = make([]corev1.EnvVar, 0)
+			}
+			for i := range existingEnv {
+				v, ok := prop[existingEnv[i].Name]
+				if ok {
+					existingEnv[i].Value = v
+					delete(prop, existingEnv[i].Name)
+				}
+			}
+			for k, v := range prop {
+				newEnv := corev1.EnvVar{
+					Name: k,
+					Value: v,
+				}
+				existingEnv = append(existingEnv, newEnv)
+			}
+
+			// update the changes into the actual container
+			dep.Spec.Template.Spec.Containers[containerIndex].Env = existingEnv
+			break
+		}
+
+		uObj, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(dep)
+		if err != nil {
+			return err
+		}
+		u.SetUnstructuredContent(uObj)
 		return nil
 	}
 }
